@@ -13,12 +13,12 @@ from homeassistant.components.climate import ClimateEntity, PLATFORM_SCHEMA
 from homeassistant.components.climate.const import (
     HVAC_MODE_OFF, HVAC_MODE_HEAT, HVAC_MODE_COOL,
     HVAC_MODE_DRY, HVAC_MODE_FAN_ONLY, HVAC_MODE_AUTO, HVAC_MODE_HEAT_COOL,
-    EVENT_HOMEASSISTANT_START,
     SUPPORT_TARGET_TEMPERATURE, SUPPORT_TARGET_HUMIDITY, SUPPORT_FAN_MODE,
     SUPPORT_SWING_MODE, HVAC_MODES, ATTR_HVAC_MODE, ATTR_HUMIDITY)
 from homeassistant.const import (
     CONF_NAME, STATE_ON, STATE_OFF, STATE_UNKNOWN, STATE_UNAVAILABLE,
     ATTR_TEMPERATURE, ATTR_DEVICE_CLASS, ATTR_ENTITY_ID,
+    EVENT_HOMEASSISTANT_START,
     SERVICE_TURN_ON, SERVICE_TURN_OFF,
     PRECISION_TENTHS, PRECISION_HALVES, PRECISION_WHOLE)
 from homeassistant.core import callback, DOMAIN as HA_DOMAIN, CoreState
@@ -96,10 +96,10 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Optional(CONF_MIN_RUN_TIME, default=DEFAULT_MIN_RUN_TIME): cv.positive_time_period,
     vol.Optional(CONF_DEFAULT_MODE, default=DEFAULT_MODE): cv.string,
     vol.Optional(CONF_FULL_SPEED_START, default=True): cv.boolean,
-    vol.Optional(CONF_HOT_COMFORT_TEMPERATURE, default=DEFAULT_HOT_COMFORT_TEMPERATURE): cv.float,
-    vol.Optional(CONF_COLD_COMFORT_TEMPERATURE, default=DEFAULT_COLD_COMFORT_TEMPERATURE): cv.float,
-    vol.Optional(CONF_MIN_TEMPERATURE): cv.float,
-    vol.Optional(CONF_MAX_TEMPERATURE): cv.float,
+    vol.Optional(CONF_HOT_COMFORT_TEMPERATURE, default=DEFAULT_HOT_COMFORT_TEMPERATURE): vol.Coerce(float),
+    vol.Optional(CONF_COLD_COMFORT_TEMPERATURE, default=DEFAULT_COLD_COMFORT_TEMPERATURE):vol.Coerce(float),
+    vol.Optional(CONF_MIN_TEMPERATURE): vol.Coerce(float),
+    vol.Optional(CONF_MAX_TEMPERATURE): vol.Coerce(float),
 })
 
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
@@ -226,6 +226,8 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
         self._power_on_time = 0
         self._powering = None
         self._power_sensor = None
+        self._last_target_change_time = 0
+        self._last_current_temperature = None # last current temperature
         if not self._power_sensor_id and self._switch_sensor_id:
             self._power_sensor_id = self._switch_sensor_id
 
@@ -366,7 +368,6 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
     @property
     def hvac_mode(self):
         """Return hvac mode ie. heat, cool."""
-        _LOGGER.debug("get hvac_mode:%s", self._hvac_mode)
         return self._hvac_mode
 
     @property
@@ -447,8 +448,10 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
 
     # <internal> switch power_sensor on(True) or off(False). defaults to `on`
     async def async_power_sensor_switch_on(self, on = True):
-        _LOGGER.debug("async_power_sensor_switch_on=%s new_on=%s", switch.is_on(self.hass, self._switch_sensor_id), on)
-        if on == switch.is_on(self.hass, self._switch_sensor_id):
+        isOldSwitchOn = switch.is_on(self.hass, self._switch_sensor_id)
+
+        _LOGGER.debug("async_power_sensor_switch_on=%s new_on=%s",isOldSwitchOn, on)
+        if on == isOldSwitchOn:
             return
 
         if on:
@@ -464,10 +467,11 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
             await self.hass.services.async_call(
                 HA_DOMAIN, switchOn, data, context=self._context
             )
-            isSwitchOn = switch.is_on(self.hass, self._switch_sensor_id)
-            if on and isSwitchOn:
-                self._power_on_time = time.time()
-            elif not isSwitchOn:
+            if on:
+                if not isOldSwitchOn:
+                    self._power_on_time = time.time()
+                    self._last_target_change_time = self._power_on_time
+            elif isOldSwitchOn:
                 self._power_on_time = 0
 
         _LOGGER.debug("async_power_sensor_switch_on=%s delay=%s", switchOn, delayTime)
@@ -475,55 +479,69 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
 
     async def async_check_temperature(self, **kwargs):
         oldMode = self._hvac_mode
-        if oldMode is HVAC_MODE_OFF or self._current_temperature is None or self._powering is not None:
+        if oldMode == HVAC_MODE_OFF or self._current_temperature is None or self._powering is not None:
             return
         diff_temp = self._target_temperature - self._current_temperature
-        _LOGGER.debug('check temperature value: target=%s, diff=%s, coldt=%s, Mode=%s', self._target_temperature, diff_temp, self._cold_tolerance, oldMode)
+        diff_target = self._target_temperature - self._target_temperature_climate
+        #_LOGGER.debug('check temperature value: target=%s, diff=%s, coldt=%s, Mode=%s', self._target_temperature, diff_temp, self._cold_tolerance, oldMode)
         temperature = self._target_temperature
-        isIdlePower = self._min_power_meter and math.isclose(self.power_meter(), self._min_power_meter, rel_tol=50)
-        isWorking = not isIdlePower if type(isIdlePower) is bool else True
+        isIdle = self._min_power_meter and abs(self.power_meter() - self._min_power_meter) <=50
+        isWorking = False
+
+        # _LOGGER.debug('check temperature value: target=%s, diff=%s, coldt=%s, Mode=%s', self._target_temperature, diff_temp, self._cold_tolerance, oldMode)
+        temperature = self._target_temperature
+        isIdle = self._min_power_meter and abs(self.power_meter() - self._min_power_meter) <=50
+        isWorking = not isIdle if type(isIdle) is bool else False
+        changedIntervalTime = time.time() - self._last_target_change_time
         minRunTime = self._run_time.total_seconds()
         # isCoolMode = self._hvac_mode in [HVAC_MODE_COOL, HVAC_MODE_DRY]
         if -diff_temp >= self._cold_tolerance:
             # current temperature > target temperature
+            # so need to cooling
 
             if self._hvac_mode not in [HVAC_MODE_COOL, HVAC_MODE_AUTO, HVAC_MODE_HEAT_COOL]:
                 kwargs[ATTR_HVAC_MODE] = HVAC_MODE_COOL
                 self._hvac_mode = HVAC_MODE_COOL
-            # need to cooling
-            if math.isclose(temperature, self._target_temperature_climate, rel_tol=0.1):
-                if self._power_on_time >= minRunTime and isWorking:
+            if abs(diff_target) <= 0.1 or isIdle:
+                if changedIntervalTime >= minRunTime:
                     temperature = self._target_temperature_climate - 1
                 elif oldMode in [HVAC_MODE_COOL, HVAC_MODE_AUTO, HVAC_MODE_HEAT_COOL]:
                     return
-        elif diff_temp >= self._hot_tolerance:
+        elif diff_temp > self._hot_tolerance:
             # current temperature < target temperature
+            # so stop to cool
             #if self._hvac_mode != HVAC_MODE_FAN_ONLY:
             #    kwargs[ATTR_HVAC_MODE] = HVAC_MODE_FAN_ONLY
             #self._hvac_mode = HVAC_MODE_FAN_ONLY
 
-            _LOGGER.debug('check temp isclose %s,powertime %s %s',math.isclose(temperature, self._target_temperature_climate, rel_tol=0.1), self._power_on_time , minRunTime)
-            if math.isclose(temperature, self._target_temperature_climate, rel_tol=0.1):
-                if self._power_on_time >= minRunTime and isWorking:
-                    temperature = self._target_temperature_climate + 1
+            _LOGGER.debug('stop cool diff_target(%s)<=0.1, changedIntervalTime=%ss', diff_target, changedIntervalTime)
+            if abs(diff_target) <= 0.1 or isWorking:
+                # if changedIntervalTime >= minRunTime:
+                temperature = self._target_temperature_climate + 1
                 #elif oldMode == HVAC_MODE_FAN_ONLY:
                 #    return
         elif abs(diff_temp) < self._cold_tolerance:
-            if isWorking:
+            # current temperature == target temperature
+            if changedIntervalTime >= minRunTime and isWorking:
                 temperature = self._target_temperature_climate + 1
 
-        if temperature < self._min_temperature or temperature > self._max_temperature:
-            _LOGGER.warning('The temperature value is out of min/max range')
-            return
-
-        if self._precision == PRECISION_WHOLE:
+        if temperature < self._min_temperature:
+            _LOGGER.warning('The temperature "%s" < min_temperature "%s"',  temperature, self._min_temperature)
+            temperature = self._min_temperature
+        elif temperature > self._max_temperature:
+            _LOGGER.warning('The temperature "%s" > max_temperature "%s"',  temperature, self._max_temperature)
+            temperature = self._max_temperature
+        elif self._precision == PRECISION_WHOLE:
             temperature = round(temperature)
         else:
             temperature = round(temperature, 1)
+
         if self._target_temperature_climate == temperature:
             return
+        _LOGGER.debug("adjust target temperature from %s to %s", self._target_temperature_climate, temperature)
         self._target_temperature_climate = temperature
-        _LOGGER.debug("async_check_temperature: adjust target_temperature_climate=%s", temperature)
+        self._last_current_temperature = self._current_temperature
+        self._last_target_change_time = time.time()
 
         await self.async_update_temperature(**kwargs)
 

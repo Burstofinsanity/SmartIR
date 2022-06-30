@@ -19,6 +19,24 @@ _Please note that the device_code field only accepts positive numbers. The .json
 | `temperature_sensor` | string | optional | *entity_id* for a temperature sensor |
 | `humidity_sensor` | string | optional | *entity_id* for a humidity sensor |
 | `power_sensor` | string | optional | *entity_id* for a sensor that monitors whether your device is actually `on` or `off`. This may be a power monitor sensor. (Accepts only on/off states) |
+| `switch_sensor` | string | optional | *entity_id* for a sensor that switch on/off the climate. |
+| `power_meter_sensor` | string | optional | *entity_id* for a sensor that get the climate's power meter (W). |
+| `use_temperature_sensor` | boolean | optional | Whether use the `temperature_sensor` to adjust temperature |
+| `cold_tolerance` | number | optional | Set a minimum amount of difference between the temperature read by the sensor specified in the `temperature_sensor` option and the target temperature that must change prior. defaults to 0.3 |
+| `hot_tolerance` | number | optional | Set a minimum amount of difference between the target temperature and the temperature read by the sensor specified in the `temperature_sensor` option that must change prior. defaults to 0.3 |
+| `delay_on` | number(positive_time_period) | optional | only available on the `switch_sensor` is set. defaults to 2 seconds |
+| `delay_off` | number(positive_time_period) | optional | only available on the `switch_sensor` is set. defaults to 60 seconds |
+| `off_power_meter` | number | optional | The power when the climate shutdown. only available on the `power_meter_sensor` is set. |
+| `min_power_meter` | number | optional | The min power for the climate idle. only available on the `power_meter_sensor` is set. |
+| `max_power_meter` | number | optional | The max power for the climate full working. only available on the `power_meter_sensor` is set. |
+| `min_run_time` | number(positive_time_period) | optional | the min run time to check the climate. defaults to 1800(30 minutes) |
+| `default_mode` | string | optional | the climate mode when on. defaults to "auto" |
+| `full_speed_start` | boolean | optional | Whether run at full speed for at least run_time minutes on startup. defaults to True |
+| `hot_comfort_temperature` | float | optional |  The comfort temperature on summer. defaults to 26℃ |
+| `cold_comfort_temperature` | float | optional |  The comfort temperature on winter. defaults to 26℃ |
+| `min_temperature` | float | optional |  The min temperature to set. |
+| `max_temperature` | float | optional |  The max temperature to set. |
+
 
 ## Example (using broadlink controller):
 Add a Broadlink RM device named "Bedroom" via config flow (read the [docs](https://www.home-assistant.io/integrations/broadlink/)).
