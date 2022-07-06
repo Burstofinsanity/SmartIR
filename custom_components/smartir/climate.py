@@ -9,12 +9,17 @@ import voluptuous as vol
 
 from homeassistant.helpers import entity_registry as er
 from homeassistant.components import switch
-from homeassistant.components.climate import ClimateEntity, PLATFORM_SCHEMA
+from homeassistant.components.climate import (
+    ClimateEntity, PLATFORM_SCHEMA,
+    DEFAULT_MIN_HUMIDITY, DEFAULT_MAX_HUMIDITY,
+)
 from homeassistant.components.climate.const import (
     HVAC_MODE_OFF, HVAC_MODE_HEAT, HVAC_MODE_COOL,
     HVAC_MODE_DRY, HVAC_MODE_FAN_ONLY, HVAC_MODE_AUTO, HVAC_MODE_HEAT_COOL,
     SUPPORT_TARGET_TEMPERATURE, SUPPORT_TARGET_HUMIDITY, SUPPORT_FAN_MODE,
-    SUPPORT_SWING_MODE, HVAC_MODES, ATTR_HVAC_MODE, ATTR_HUMIDITY)
+    SUPPORT_SWING_MODE, HVAC_MODES,
+    ATTR_HVAC_MODE, ATTR_HUMIDITY, ATTR_TARGET_TEMP_STEP, ATTR_MIN_TEMP, ATTR_MAX_TEMP,
+)
 from homeassistant.const import (
     CONF_NAME, STATE_ON, STATE_OFF, STATE_UNKNOWN, STATE_UNAVAILABLE,
     ATTR_TEMPERATURE, ATTR_DEVICE_CLASS, ATTR_ENTITY_ID,
@@ -63,8 +68,7 @@ CONF_DEFAULT_MODE = "default_mode"
 CONF_FULL_SPEED_START = "full_speed_start"
 CONF_HOT_COMFORT_TEMPERATURE = "hot_comfort_temperature"
 CONF_COLD_COMFORT_TEMPERATURE = "cold_comfort_temperature"
-CONF_MIN_TEMPERATURE = "min_temperature"
-CONF_MAX_TEMPERATURE = "max_temperature"
+CONF_PRECISION = "precision"
 
 SUPPORT_FLAGS = (
     SUPPORT_TARGET_TEMPERATURE |
@@ -98,9 +102,22 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Optional(CONF_FULL_SPEED_START, default=True): cv.boolean,
     vol.Optional(CONF_HOT_COMFORT_TEMPERATURE, default=DEFAULT_HOT_COMFORT_TEMPERATURE): vol.Coerce(float),
     vol.Optional(CONF_COLD_COMFORT_TEMPERATURE, default=DEFAULT_COLD_COMFORT_TEMPERATURE):vol.Coerce(float),
-    vol.Optional(CONF_MIN_TEMPERATURE): vol.Coerce(float),
-    vol.Optional(CONF_MAX_TEMPERATURE): vol.Coerce(float),
+    vol.Optional(ATTR_MIN_TEMP): vol.Coerce(float),
+    vol.Optional(ATTR_MAX_TEMP): vol.Coerce(float),
+    vol.Optional(ATTR_TARGET_TEMP_STEP): vol.Coerce(float),
+    vol.Optional(CONF_PRECISION): vol.Coerce(float),
 })
+
+def get_by_precision(temperature: float, precision: float = PRECISION_WHOLE):
+    # Round in the units appropriate
+    if precision == PRECISION_HALVES:
+        temperature = round(temperature * 2) / 2.0
+    elif precision == PRECISION_TENTHS:
+        temperature = round(temperature, 1)
+    # Integer as a fall back (PRECISION_WHOLE)
+    else:
+        temperature = round(temperature)
+    return temperature
 
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
     """Set up the IR Climate platform."""
@@ -171,43 +188,51 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
         self._full_speed_start = config.get(CONF_FULL_SPEED_START)
         self._hot_comfort_temperature = config.get(CONF_HOT_COMFORT_TEMPERATURE)
         self._cold_comfort_temperature = config.get(CONF_COLD_COMFORT_TEMPERATURE)
+        self._attr_target_temperature_step = config.get(ATTR_TARGET_TEMP_STEP)
+        self._attr_precision = config.get(CONF_PRECISION)
 
         self._manufacturer = device_data['manufacturer']
         self._supported_models = device_data['supportedModels']
         self._supported_controller = device_data['supportedController']
         self._commands_encoding = device_data['commandsEncoding']
-        self._min_temperature = device_data['minTemperature']
-        t = config.get(CONF_MIN_TEMPERATURE)
-        if t and t > self._min_temperature:
-            self._min_temperature = t
-        t = config.get(CONF_MAX_TEMPERATURE)
-        if t and t < self._max_temperature:
-            self._max_temperature = t
-        self._max_temperature = device_data['maxTemperature']
-        self._min_humidity = device_data.get('minHumidity') or 30
-        self._max_humidity = device_data.get('maxHumidity') or 99
-        self._precision = device_data['precision']
+
+        self._attr_min_temp = device_data['minTemperature']
+        self._attr_max_temp = device_data['maxTemperature']
+        self._attr_min_humidity = device_data.get('minHumidity', DEFAULT_MIN_HUMIDITY)
+        self._attr_max_humidity = device_data.get('maxHumidity', DEFAULT_MAX_HUMIDITY)
+        self._precision_climate = device_data['precision']
+
+        t = config.get(ATTR_MIN_TEMP)
+        if t and t > self._attr_min_temp:
+            self._attr_min_temp = t
+        t = config.get(ATTR_MAX_TEMP)
+        if t and t < self._attr_max_temp:
+            self._attr_max_temp = t
+        if self._attr_target_temperature_step is None:
+            self._attr_target_temperature_step = self._precision_climate
+        if self._attr_precision is None:
+            self._attr_precision = self._precision_climate
 
         valid_hvac_modes = [x for x in device_data['operationModes'] if x in HVAC_MODES]
 
         self._operation_modes = [HVAC_MODE_OFF] + valid_hvac_modes
-        self._fan_modes = device_data['fanModes']
-        self._swing_modes = device_data.get('swingModes')
+        self._attr_fan_modes = device_data['fanModes']
+        self._attr_swing_modes = device_data.get('swingModes')
         self._commands = device_data['commands']
 
-        self._target_temperature = self._hot_comfort_temperature
+        self._attr_target_temperature = self._hot_comfort_temperature
         # the target temperature on climate
         self._target_temperature_climate = self._hot_comfort_temperature
-        self._target_humidity = self._min_humidity
+        self._attr_target_humidity = self._attr_min_humidity
         self._hvac_mode = HVAC_MODE_OFF
-        self._current_fan_mode = self._fan_modes[0]
-        self._current_swing_mode = None
+        self._attr_fan_mode = self._attr_fan_modes[0]
+        self._attr_swing_mode = None
         self._last_on_operation = None
 
         self._current_temperature = None
         self._current_humidity = None
 
-        self._unit = hass.config.units.temperature_unit
+        self._attr_temperature_unit = hass.config.units.temperature_unit
 
         #Supported features
         self._support_flags = SUPPORT_FLAGS
@@ -216,9 +241,9 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
         if self._humidity_sensor_id:
             self._support_flags = self._support_flags | SUPPORT_TARGET_HUMIDITY
 
-        if self._swing_modes:
+        if self._attr_swing_modes:
             self._support_flags = self._support_flags | SUPPORT_SWING_MODE
-            self._current_swing_mode = self._swing_modes[0]
+            self._attr_swing_mode = self._attr_swing_modes[0]
             self._support_swing = True
 
         self._temp_lock = asyncio.Lock()
@@ -228,6 +253,7 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
         self._power_sensor = None
         self._last_target_change_time = 0
         self._last_current_temperature = None # last current temperature
+
         if not self._power_sensor_id and self._switch_sensor_id:
             self._power_sensor_id = self._switch_sensor_id
 
@@ -242,19 +268,19 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
 
         if last_state is not None:
             self._hvac_mode = last_state.state
-            self._current_fan_mode = last_state.attributes['fan_mode']
-            self._current_swing_mode = last_state.attributes.get('swing_mode')
-            self._target_temperature = last_state.attributes['temperature']
-            if self._target_temperature:
-                self._target_temperature = float(self._target_temperature)
-            self._target_humidity = last_state.attributes['humidity']
-            if self._target_humidity:
-                self._target_humidity = float(self._target_humidity)
+            self._attr_fan_mode = last_state.attributes['fan_mode']
+            self._attr_swing_mode = last_state.attributes.get('swing_mode')
+            self._attr_target_temperature = last_state.attributes['temperature']
+            if self._attr_target_temperature:
+                self._attr_target_temperature = float(self._attr_target_temperature)
+            self._attr_target_humidity = last_state.attributes['humidity']
+            if self._attr_target_humidity:
+                self._attr_target_humidity = float(self._attr_target_humidity)
 
             if 'last_on_operation' in last_state.attributes:
                 self._last_on_operation = last_state.attributes['last_on_operation']
 
-            self._target_temperature_climate = self._target_temperature
+            self._target_temperature_climate = self._attr_target_temperature
             if 'temperature_climate' in last_state.attributes:
                 self._target_temperature_climate = last_state.attributes['temperature_climate']
                 if self._target_temperature_climate:
@@ -321,46 +347,6 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
         return HVAC_MODE_OFF
 
     @property
-    def temperature_unit(self):
-        """Return the unit of measurement."""
-        return self._unit
-
-    @property
-    def min_temp(self):
-        """Return the polling state."""
-        return self._min_temperature
-
-    @property
-    def max_temp(self):
-        """Return the polling state."""
-        return self._max_temperature
-
-    @property
-    def min_humidity(self):
-        """Return the polling state."""
-        return self._min_humidity
-
-    @property
-    def max_humidity(self):
-        """Return the polling state."""
-        return self._max_humidity
-
-    @property
-    def target_humidity(self):
-        """Return the temperature we try to reach."""
-        return self._target_humidity
-
-    @property
-    def target_temperature(self):
-        """Return the temperature we try to reach."""
-        return self._target_temperature
-
-    @property
-    def target_temperature_step(self):
-        """Return the supported step of target temperature."""
-        return self._precision
-
-    @property
     def hvac_modes(self):
         """Return the list of available operation modes."""
         return self._operation_modes
@@ -376,24 +362,9 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
         return self._last_on_operation
 
     @property
-    def fan_modes(self):
-        """Return the list of available fan modes."""
-        return self._fan_modes
-
-    @property
-    def fan_mode(self):
-        """Return the fan setting."""
-        return self._current_fan_mode
-
-    @property
-    def swing_modes(self):
-        """Return the swing modes currently supported for this device."""
-        return self._swing_modes
-
-    @property
     def swing_mode(self):
         """Return the current swing mode."""
-        return self._current_swing_mode
+        return self._attr_swing_mode
 
     @property
     def current_temperature(self):
@@ -423,10 +394,18 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
             'commands_encoding': self._commands_encoding
         }
 
+    @property
+    def _is_device_active(self):
+        """If the toggleable device is currently active."""
+        if not self.hass.states.get(self._power_sensor_id):
+            return None
+
+        return self.hass.states.is_state(self._power_sensor_id, STATE_ON)
+
     def power_meter(self):
         sensorId = self._power_meter_sensor_id
         powerMeter = sensorId and self.hass.states.get(sensorId).state
-        _LOGGER.debug("power_meter=%s", powerMeter)
+        # _LOGGER.debug("power_meter=%s", powerMeter)
         return (powerMeter and int(powerMeter)) or 0
 
     def power_sensor_is_switch(self):
@@ -481,15 +460,15 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
         oldMode = self._hvac_mode
         if oldMode == HVAC_MODE_OFF or self._current_temperature is None or self._powering is not None:
             return
-        diff_temp = self._target_temperature - self._current_temperature
-        diff_target = self._target_temperature - self._target_temperature_climate
+        diff_temp = self._attr_target_temperature - self._current_temperature
+        diff_target = self._attr_target_temperature - self._target_temperature_climate
         #_LOGGER.debug('check temperature value: target=%s, diff=%s, coldt=%s, Mode=%s', self._target_temperature, diff_temp, self._cold_tolerance, oldMode)
-        temperature = self._target_temperature
+        temperature = self._attr_target_temperature
         isIdle = self._min_power_meter and abs(self.power_meter() - self._min_power_meter) <=50
         isWorking = False
 
         # _LOGGER.debug('check temperature value: target=%s, diff=%s, coldt=%s, Mode=%s', self._target_temperature, diff_temp, self._cold_tolerance, oldMode)
-        temperature = self._target_temperature
+        temperature = self._attr_target_temperature
         isIdle = self._min_power_meter and abs(self.power_meter() - self._min_power_meter) <=50
         isWorking = not isIdle if type(isIdle) is bool else False
         changedIntervalTime = time.time() - self._last_target_change_time
@@ -498,6 +477,7 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
         if -diff_temp >= self._cold_tolerance:
             # current temperature > target temperature
             # so need to cooling
+            # _LOGGER.debug("-diff_temp(%s) >= self._cold_tolerance(%s)", diff_temp, self._cold_tolerance)
 
             if self._hvac_mode not in [HVAC_MODE_COOL, HVAC_MODE_AUTO, HVAC_MODE_HEAT_COOL]:
                 kwargs[ATTR_HVAC_MODE] = HVAC_MODE_COOL
@@ -507,6 +487,8 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
                     temperature = self._target_temperature_climate - 1
                 elif oldMode in [HVAC_MODE_COOL, HVAC_MODE_AUTO, HVAC_MODE_HEAT_COOL]:
                     return
+            elif self._target_temperature_climate < temperature:
+                return
         elif diff_temp > self._hot_tolerance:
             # current temperature < target temperature
             # so stop to cool
@@ -514,31 +496,35 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
             #    kwargs[ATTR_HVAC_MODE] = HVAC_MODE_FAN_ONLY
             #self._hvac_mode = HVAC_MODE_FAN_ONLY
 
-            _LOGGER.debug('stop cool diff_target(%s)<=0.1, changedIntervalTime=%ss', diff_target, changedIntervalTime)
+            # _LOGGER.debug('stop cool diff_temp(%s) > self._hot_tolerance=%s', diff_temp, self._hot_tolerance)
             if abs(diff_target) <= 0.1 or isWorking:
                 # if changedIntervalTime >= minRunTime:
                 temperature = self._target_temperature_climate + 1
                 #elif oldMode == HVAC_MODE_FAN_ONLY:
                 #    return
+            elif self._target_temperature_climate > temperature:
+                return
         elif abs(diff_temp) < self._cold_tolerance:
             # current temperature == target temperature
-            if changedIntervalTime >= minRunTime and isWorking:
+            # _LOGGER.debug("abs diff_temp(%s) < self._cold_tolerance(%s)", diff_temp, self._cold_tolerance)
+            if isWorking:
                 temperature = self._target_temperature_climate + 1
 
-        if temperature < self._min_temperature:
-            _LOGGER.warning('The temperature "%s" < min_temperature "%s"',  temperature, self._min_temperature)
-            temperature = self._min_temperature
-        elif temperature > self._max_temperature:
-            _LOGGER.warning('The temperature "%s" > max_temperature "%s"',  temperature, self._max_temperature)
-            temperature = self._max_temperature
-        elif self._precision == PRECISION_WHOLE:
-            temperature = round(temperature)
+        if temperature < self._attr_min_temp:
+            _LOGGER.warning('The temperature "%s" < min_temperature "%s"',  temperature, self._attr_min_temp)
+            temperature = self._attr_min_temp
+        elif temperature > self._attr_max_temp:
+            _LOGGER.warning('The temperature "%s" > max_temperature "%s"',  temperature, self._attr_max_temp)
+            temperature = self._attr_max_temp
         else:
-            temperature = round(temperature, 1)
+            temperature = get_by_precision(temperature, self._precision_climate)
 
         if self._target_temperature_climate == temperature:
             return
         _LOGGER.debug("adjust target temperature from %s to %s", self._target_temperature_climate, temperature)
+        _LOGGER.debug("diff_temp:%s, diff_target:%s", diff_temp, diff_target)
+        _LOGGER.debug("isIdle:%s, isWorking:%s", isIdle, isWorking)
+        _LOGGER.debug("changedIntervalTime:%s, minRunTime:%s", changedIntervalTime, minRunTime)
         self._target_temperature_climate = temperature
         self._last_current_temperature = self._current_temperature
         self._last_target_change_time = time.time()
@@ -563,19 +549,16 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
         if temperature is None:
             return
 
-        if temperature < self._min_temperature or temperature > self._max_temperature:
+        if temperature < self._attr_min_temp or temperature > self._attr_max_temp:
             _LOGGER.warning('The temperature value is out of min/max range')
             return
 
-        if self._precision == PRECISION_WHOLE:
-            self._target_temperature = round(temperature)
-        else:
-            self._target_temperature = round(temperature, 1)
+        self._attr_target_temperature = get_by_precision(temperature, self._attr_precision)
 
         if self._use_temperature_sensor:
             await self.async_check_temperature(**kwargs)
             return
-        self._target_temperature_climate = self._target_temperature
+        self._target_temperature_climate = self._attr_target_temperature
 
         await self.async_update_temperature(**kwargs)
 
@@ -585,14 +568,11 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
 
         if humidity is None:
             return
-        if humidity < self._min_humidity or humidity > self._max_humidity:
+        if humidity < self._attr_min_humidity or humidity > self._attr_max_humidity:
             _LOGGER.warning('The humidity value is out of min/max range')
             return
 
-        if self._precision == PRECISION_WHOLE:
-            self._target_humidity = round(humidity)
-        else:
-            self._target_humidity = round(humidity, 1)
+        self._attr_target_humidity = get_by_precision(humidity, self._attr_precision)
 
     async def async_set_hvac_mode(self, hvac_mode):
         """Set operation mode."""
@@ -621,7 +601,7 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
             if isPowerSwitch:
                 await self.async_power_sensor_switch_on(True)
             if not lastIsOn and self._full_speed_start:
-                self._target_temperature_climate = self._min_temperature
+                self._target_temperature_climate = self._attr_min_temp
 
         await self.send_command()
         await self.async_update_ha_state()
@@ -634,7 +614,7 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
 
     async def async_set_fan_mode(self, fan_mode):
         """Set fan mode."""
-        self._current_fan_mode = fan_mode
+        self._attr_fan_mode = fan_mode
 
         if not self._hvac_mode.lower() == HVAC_MODE_OFF:
             await self.send_command()
@@ -642,7 +622,7 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
 
     async def async_set_swing_mode(self, swing_mode):
         """Set swing mode."""
-        self._current_swing_mode = swing_mode
+        self._attr_swing_mode = swing_mode
 
         if not self._hvac_mode.lower() == HVAC_MODE_OFF:
             await self.send_command()
@@ -664,8 +644,8 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
             try:
                 self._on_by_remote = False
                 operation_mode = self._hvac_mode
-                fan_mode = self._current_fan_mode
-                swing_mode = self._current_swing_mode
+                fan_mode = self._attr_fan_mode
+                swing_mode = self._attr_swing_mode
                 target_temperature = '{0:g}'.format(self._target_temperature_climate)
                 _LOGGER.debug("send cmd: operation_mode=%s, fan_mode=%s, swing_mode=%s, target_temperature=%s", operation_mode, fan_mode, swing_mode, target_temperature)
 
