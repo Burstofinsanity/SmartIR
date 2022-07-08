@@ -36,6 +36,7 @@ _Please note that the device_code field only accepts positive numbers. The .json
 | `cold_comfort_temperature` | float | optional |  The comfort temperature on winter. defaults to 26℃ |
 | `min_temperature` | float | optional |  The min temperature to set. |
 | `max_temperature` | float | optional |  The max temperature to set. |
+| `precision` | list(float) | optional |  The precision to target temperature. defaults to the device's precision. only useful for use_temperature_sensor |
 
 
 ## Example (using broadlink controller):
