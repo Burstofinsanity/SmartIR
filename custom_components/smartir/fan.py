@@ -8,8 +8,9 @@ import voluptuous as vol
 from homeassistant.components.fan import (
     FanEntity, PLATFORM_SCHEMA,
     DIRECTION_REVERSE, DIRECTION_FORWARD,
-    SUPPORT_SET_SPEED, SUPPORT_DIRECTION, SUPPORT_OSCILLATE,
-    ATTR_OSCILLATING )
+    SUPPORT_SET_SPEED, SUPPORT_DIRECTION, SUPPORT_OSCILLATE, SUPPORT_PRESET_MODE,
+    ATTR_OSCILLATING, ATTR_PRESET_MODE,
+)
 from homeassistant.const import (
     CONF_NAME, STATE_OFF, STATE_ON, STATE_UNKNOWN)
 from homeassistant.core import callback
@@ -233,7 +234,7 @@ class SmartIRFan(FanEntity, RestoreEntity):
         """Set oscillation of the fan."""
         self._oscillating = oscillating
 
-        await self.send_command()
+        await self._send_command(self._commands['oscillate'])
         await self.async_update_ha_state()
 
     async def async_set_direction(self, direction: str):
@@ -250,24 +251,34 @@ class SmartIRFan(FanEntity, RestoreEntity):
         if percentage is None:
             percentage = ordered_list_item_to_percentage(
                 self._speed_list, self._last_on_speed or self._speed_list[0])
-
-        await self.async_set_percentage(percentage)
+        command = self._commands.get('on')
+        if command:
+            self._speed = percentage_to_ordered_list_item(
+                self._speed_list, percentage)
+            await self._send_command(command)
+            await self.async_update_ha_state()
+        else:
+            await self.async_set_percentage(percentage)
 
     async def async_turn_off(self):
         """Turn off the fan."""
         await self.async_set_percentage(0)
+
+    async def _send_command(self, command):
+        async with self._temp_lock:
+            try:
+                await self._controller.send(command, self)
+            except Exception as e:
+                _LOGGER.exception(e)
 
     async def send_command(self):
         async with self._temp_lock:
             self._on_by_remote = False
             speed = self._speed
             direction = self._direction or 'default'
-            oscillating = self._oscillating
 
             if speed.lower() == SPEED_OFF:
                 command = self._commands['off']
-            elif oscillating:
-                command = self._commands['oscillate']
             else:
                 command = self._commands[direction][speed]
 
