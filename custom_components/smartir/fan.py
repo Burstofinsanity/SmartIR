@@ -123,6 +123,13 @@ class SmartIRFan(FanEntity, RestoreEntity):
             self._support_flags = (
                 self._support_flags | SUPPORT_OSCILLATE)
 
+        modes = device_data.get('modes', [])
+        if len(modes) > 0 and 'mode' in self._commands:
+            self._attr_preset_modes = modes
+            self._attr_preset_mode = modes[0]
+            self._support_flags = (
+                self._support_flags | SUPPORT_PRESET_MODE)
+
 
         self._temp_lock = asyncio.Lock()
         self._on_by_remote = False
@@ -148,6 +155,9 @@ class SmartIRFan(FanEntity, RestoreEntity):
 
             if 'last_on_speed' in last_state.attributes:
                 self._last_on_speed = last_state.attributes['last_on_speed']
+
+            if ATTR_PRESET_MODE in last_state.attributes:
+                self._attr_preset_mode = last_state.attributes[ATTR_PRESET_MODE]
 
             if self._power_sensor:
                 async_track_state_change(self.hass, self._power_sensor,
@@ -215,6 +225,18 @@ class SmartIRFan(FanEntity, RestoreEntity):
             'supported_controller': self._supported_controller,
             'commands_encoding': self._commands_encoding,
         }
+
+    async def async_set_preset_mode(self, preset_mode: str) -> None:
+        command = self._commands['mode']
+        if type(command) is dict:
+            command = command.get(preset_mode)
+            if command:
+                try:
+                    await self._controller.send(command, self)
+                except Exception as e:
+                    _LOGGER.exception(e)
+                return
+        _LOGGER.error("The fan preset_mode command('%s') is not found", preset_mode)
 
     async def async_set_percentage(self, percentage: int):
         """Set the desired speed for the fan."""
