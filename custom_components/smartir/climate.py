@@ -520,7 +520,7 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
         else:
             temperature = get_by_precision(temperature, self._precision_climate)
 
-        if self._target_temperature_climate == temperature:
+        if self._target_temperature_climate == temperature or changedIntervalTime < 60:
             return
         _LOGGER.debug("adjust target temperature from %s to %s", self._target_temperature_climate, temperature)
         _LOGGER.debug("diff_temp:%s, diff_target:%s", diff_temp, diff_target)
