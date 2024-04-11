@@ -208,10 +208,15 @@ class Helper():
             # For example the 0x123 value will be in shown as '00' '01' '23'
             # so we need to skip the '00' flag and combine the next tow bytes to one hex value
             if current == 0:
-                ix+=1
-                subview = mPulses[ix:ix+2] # point to the word(big-endian)
-                current = struct.unpack('>H', subview)[0]
-                ix+=1
+                ix += 1
+                # Ensure there are at least 2 bytes remaining in the buffer
+                if ix + 1 < len(pulses):
+                    subview = mPulses[ix:ix+2]  # Take the next 2 bytes
+                    current = struct.unpack('>H', subview)[0]
+                    ix += 1
+                else:
+                    # Append a 0 byte to the result list
+                    result.append(0)
             # Get the pulse lengths (revers the formula: µs * 2^-15)
             current = math.floor(current / 269 * 8192)
             result.append(current)
